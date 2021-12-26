@@ -1,0 +1,105 @@
+package com.telegramBotTest.telegramBotTest.service;
+
+import com.telegramBotTest.telegramBotTest.dao.ExplorerDaoInterface;
+import com.telegramBotTest.telegramBotTest.dto.ExplorerContractSourceCode;
+import com.telegramBotTest.telegramBotTest.dto.ExplorerPairCreated;
+import com.telegramBotTest.telegramBotTest.dto.ExplorerTokenInfo;
+import com.telegramBotTest.telegramBotTest.token.Pair;
+import com.telegramBotTest.telegramBotTest.token.Security;
+import com.telegramBotTest.telegramBotTest.token.Token;
+import com.telegramBotTest.telegramBotTest.useful.DataExtractor;
+import com.telegramBotTest.telegramBotTest.useful.Parser;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.stream.Collectors;
+
+abstract class ExplorerService {
+
+    @Autowired
+    private DataExtractor dataExtractor;
+
+    private final Logger logger = LoggerFactory.getLogger(ExplorerService.class);
+
+    protected ExplorerService() {
+    }
+
+    protected String getBlockNumber(ExplorerDaoInterface explorer){
+        return dataExtractor.extractNumberOfLastBlock(explorer.callBlockNumberUrl());
+    }
+
+    protected List<Token> getCreatedPair(ExplorerDaoInterface explorer, String fromBlock){
+        ExplorerPairCreated explorerPairCreated;
+        try{
+            explorerPairCreated = explorer.callLastCreatedPairsUrl(fromBlock);
+        }catch (Exception ignore){
+            explorerPairCreated = new ExplorerPairCreated();
+//            explorerPairCreated.setResult(new ExplorerPairCreated.ExplorerResult[]{});
+        }
+
+        List<Token> tokens = new ArrayList<>();
+
+        for (ExplorerPairCreated.ExplorerResult result : explorerPairCreated.getResult()) {
+            try {
+                String tokenAddress = dataExtractor.extractTokenAddressFromPair(result);
+                String tokenLiquidityBaseAddress = dataExtractor.extractBaseLiquidityAddressFromPair(result, tokenAddress);
+                String pairAddress = dataExtractor.extractPairAddress(result);
+
+                String tokenAddressBalance = explorer
+                        .callTokenBalanceInContract(tokenAddress, pairAddress).getResult();
+
+                String tokenLiquidityBaseBalance = explorer
+                        .callTokenBalanceInContract(tokenLiquidityBaseAddress, pairAddress).getResult();
+
+                ExplorerTokenInfo.ExplorerResult tokenInfo = dataExtractor.extractTokenInfo(
+                        explorer
+                                .callTokenInfoUrl(tokenAddress)
+                                .getResult()[0]);
+
+                ExplorerTokenInfo.ExplorerResult tokenLiquidityBaseInfo = dataExtractor.extractTokenInfo(
+                        explorer
+                                .callTokenInfoUrl(tokenLiquidityBaseAddress)
+                                .getResult()[0]);
+
+                ExplorerContractSourceCode.ExplorerResult sourceCode = explorer.callContractSourceCode(tokenAddress).getResult()[0];
+
+                String blockNumber = Parser.hexToDec(result.getBlockNumber().replace("0x", ""));
+
+                tokens.add(Token.builder()
+                        .address(tokenAddress)
+                        .tokenName(tokenInfo.getTokenName())
+                        .tokenSymbol(tokenInfo.getTokenSymbol())
+                        .totalSupply(Parser.divideByDecimals(tokenInfo.getValue(), tokenInfo.getTokenDecimal()))
+                        .tokenDecimal(tokenInfo.getTokenDecimal())
+                        .blockNumber(blockNumber)
+                        .liquidityPair(Pair.builder()
+                                        .pairAddress(pairAddress)
+                                        .tokenSymbol1(tokenInfo.getTokenSymbol())
+                                        .value1(Parser.divideByDecimals(tokenAddressBalance, tokenInfo.getTokenDecimal()))
+                                        .address2(tokenLiquidityBaseAddress)
+                                        .tokenSymbol2(tokenLiquidityBaseInfo.getTokenSymbol())
+                                        .value2(Parser.divideByDecimals(tokenLiquidityBaseBalance, tokenLiquidityBaseInfo.getTokenDecimal()))
+                                        .build())
+                        .security(Security.builder()
+                                .verified(sourceCode.getRuns().equals("200"))
+                                .contractName(sourceCode.getContractName())
+                                .compilerVersion(sourceCode.getCompilerVersion())
+                                .licenseType(sourceCode.getLicenseType())
+                                .build())
+                        .build());
+
+            }
+            catch (Exception e){
+                logger.error("Something went wrong", e);
+            }
+        }
+
+        return tokens.stream()
+                .sorted(Comparator.comparing(Token::getBlockNumber))
+                .collect(Collectors.toList());
+    }
+}
